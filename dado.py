@@ -40,6 +40,23 @@ BTN_RETO = 21   # pin 40
 
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
+reto_history = []  # Retos dados en esta sesion (para no repetir)
+
+RETO_TOOL = {
+    "name": "record_reto",
+    "description": "Registra el reto que vas a dar al jugador. DEBES llamar esta herramienta con el reto.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reto": {
+                "type": "string",
+                "description": "El reto corto para el jugador, maximo 30 caracteres, solo ASCII"
+            }
+        },
+        "required": ["reto"]
+    }
+}
+
 # ── LCD Setup ───────────────────────────────────────
 time.sleep(3)
 lcd = CharLCD(
@@ -202,9 +219,9 @@ def show_dice_result(face, double=False):
     else:
         lcd_write(f"  Salio:  [ {face} ]", dots[face])
 
-# ── Claude Reto ────────────────────────────────────
+# ── Claude Reto (Agente con memoria) ─────────────
 def ask_reto():
-    """Pide a Claude un reto para el jugador"""
+    """Pide a Claude un reto usando tool use. Registra retos para no repetir."""
     if not CLAUDE_AVAILABLE:
         retos = [
             "Imita un animal",
@@ -222,23 +239,57 @@ def ask_reto():
 
     try:
         client = anthropic.Anthropic()
+
+        # Inyectar historial para que Claude no repita
+        history_text = ""
+        if reto_history:
+            recent = reto_history[-20:]
+            history_text = (
+                "\nYa diste estos retos, NO los repitas:\n"
+                + "\n".join(f"- {r}" for r in recent)
+            )
+
+        system_prompt = (
+            "Sos el game master de un juego de mesa familiar con ninos.\n"
+            "DEBES usar la herramienta record_reto para dar tu reto.\n"
+            "El reto debe ser divertido y facil, maximo 30 caracteres, solo ASCII.\n"
+            "Ejemplos: Imita un gato, Salta 3 veces, Canta algo, Baila 5 segundos\n"
+            "Usa espanol simple. Sin acentos ni tildes."
+            + history_text
+        )
+
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=30,
-            system=f"""Sos el game master de un juego de mesa familiar con ninos.
-REGLA ESTRICTA: Responde SOLO con el reto, maximo 30 caracteres. Sin comillas, sin explicacion.
-El reto debe ser algo divertido y facil que se pueda hacer en el momento.
-Ejemplos: Imita un gato, Salta 3 veces, Canta algo, Baila 5 segundos
-Usa espanol simple. Solo ASCII basico (sin acentos ni tildes).
-Varia los retos - que sean divertidos y apropiados para ninos.""",
+            max_tokens=100,
+            system=system_prompt,
+            tools=[RETO_TOOL],
+            tool_choice={"type": "tool", "name": "record_reto"},
             messages=[{
                 "role": "user",
                 "content": "Dame un reto divertido y corto para un jugador."
             }]
         )
-        msg = response.content[0].text.strip()
-        msg = msg.encode('ascii', 'replace').decode('ascii')
-        return msg[:32]
+
+        # Extraer reto del tool_use block
+        reto = None
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "record_reto":
+                reto = block.input.get("reto", "").strip()
+                break
+
+        if not reto:
+            return "Imita un animal"
+
+        # Sanitizar
+        reto = reto.encode('ascii', 'replace').decode('ascii')
+        reto = reto[:32]
+
+        # Registrar en historial
+        reto_history.append(reto)
+        print(f"[Agente] Retos dados: {len(reto_history)}")
+
+        return reto
+
     except Exception as e:
         print(f"Error Claude: {e}")
         return "Imita un animal"
